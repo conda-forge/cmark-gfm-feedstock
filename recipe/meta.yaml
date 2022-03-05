@@ -1,5 +1,5 @@
 {% set name = "cmark-gfm" %}
-{% set version = "0.29.0.gfm.2" %}
+{% set version = "0.29.0.gfm.3" %}
 
 package:
   name: {{ name|lower }}
@@ -7,7 +7,7 @@ package:
 
 source:
   url: https://github.com/github/{{ name }}/archive/refs/tags/{{ version }}.tar.gz
-  sha256: 66d92c8bef533744674c5b64d8744227584b12704bcfebbe16dab69f81e62029
+  sha256: 56fba15e63676c756566743dcd43c61c6a77cc1d17ad8be88a56452276ba4d4c
 
 build:
   number: 0
@@ -19,6 +19,7 @@ requirements:
     - {{ compiler('c') }}
     - {{ compiler('cxx') }}
     - cmake
+    - make  # [unix]
 
 test:
   commands:
@@ -37,7 +38,7 @@ about:
   license: BSD-2-Clause
   license_family: BSD
   license_file: COPYING
-  summary: "GitHub's Fork of cmark"
+  summary: GitHub's Fork of cmark
   description: |
     cmark-gfm is an extended version of the C reference implementation of
     CommonMark, a rationalized version of Markdown syntax with a spec.
