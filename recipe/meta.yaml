@@ -1,5 +1,5 @@
 {% set name = "cmark-gfm" %}
-{% set version = "0.29.0.gfm.6" %}
+{% set version = "0.29.0.gfm.7" %}
 
 package:
   name: {{ name|lower }}
@@ -7,7 +7,7 @@ package:
 
 source:
   url: https://github.com/github/{{ name }}/archive/refs/tags/{{ version }}.tar.gz
-  sha256: b17d86164c0822b5db3818780b44cb130ff30e9c6ec6a64f199b6d142684dba0
+  sha256: d6b9a32cdc0b419a463f45527bf51ef8102d232bacce8957f4e2fab4fdd5308d
 
 build:
   number: 0
