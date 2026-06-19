@@ -2,7 +2,7 @@ schema_version: 1
 
 context:
   name: cmark-gfm
-  version: "0.29.0.gfm.8"
+  version: "0.29.0.gfm.13"
 
 package:
   name: ${{ name }}
@@ -10,10 +10,10 @@ package:
 
 source:
   url: https://github.com/github/${{ name }}/archive/refs/tags/${{ version }}.tar.gz
-  sha256: 94a145b7bc18cd4e85edce0a65ac71f24cbafe8e4402c3213835517408a10118
+  sha256: 5abc61798ebd9de5660bc076443c07abad2b8d15dbc11094a3a79644b8ad243a
 
 build:
-  number: 1
+  number: 0
 
 requirements:
   build:
