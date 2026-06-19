@@ -1,0 +1,65 @@
+schema_version: 1
+
+context:
+  name: cmark-gfm
+  version: "0.29.0.gfm.8"
+
+package:
+  name: ${{ name }}
+  version: ${{ version }}
+
+source:
+  url: https://github.com/github/${{ name }}/archive/refs/tags/${{ version }}.tar.gz
+  sha256: 94a145b7bc18cd4e85edce0a65ac71f24cbafe8e4402c3213835517408a10118
+
+build:
+  number: 1
+
+requirements:
+  build:
+    - ${{ compiler('c') }}
+    - ${{ compiler('cxx') }}
+    - ${{ stdlib('c') }}
+    - cmake
+    - if: unix
+      then: make
+  run_exports:
+    - ${{ pin_subpackage("cmark-gfm") }}
+
+tests:
+  - script:
+      - cmark-gfm --version
+      - if: win
+        then:
+          - 'if not exist %LIBRARY_BIN%\cmark-gfm.dll exit 1'
+          - 'if not exist %LIBRARY_BIN%\cmark-gfm-extensions.dll exit 1'
+          - 'if not exist %LIBRARY_INC%\cmark-gfm-extension_api.h exit 1'
+      - if: linux
+        then:
+          - test -f $PREFIX/lib/libcmark-gfm.so
+          - test -f $PREFIX/lib/libcmark-gfm-extensions.so
+      - if: osx
+        then:
+          - test -f $PREFIX/lib/libcmark-gfm.dylib
+          - test -f $PREFIX/lib/libcmark-gfm-extensions.dylib
+      - if: unix
+        then:
+          - test -f $PREFIX/include/cmark-gfm-extension_api.h
+
+about:
+  homepage: https://github.com/github/cmark-gfm
+  license: BSD-2-Clause
+  license_file: COPYING
+  summary: GitHub's Fork of cmark
+  description: |
+    cmark-gfm is an extended version of the C reference implementation of
+    CommonMark, a rationalized version of Markdown syntax with a spec.
+    cmark-gfm adds GitHub Flavored Markdown extensions to the upstream
+    implementation.
+  repository: https://github.com/github/cmark-gfm
+  documentation: https://github.github.com/gfm/
+
+extra:
+  recipe-maintainers:
+    - saraedum
+    - timkpaine
