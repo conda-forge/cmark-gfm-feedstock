@@ -1,0 +1,874 @@
+From: posit-dev/multimark v0.5.0
+Subject: Add math support and parser fixes required by Multimark
+Source: https://github.com/posit-dev/multimark/tree/v0.5.0/third_party/cmark-gfm
+
+Copy the released source changes; adapt the CMake source list for texmath.c.
+
+--- a/src/blocks.c
++++ b/src/blocks.c
+@@ -128,6 +128,7 @@
+ 
+   memset(parser, 0, sizeof(cmark_parser));
+   parser->mem = saved_mem;
++  cmark_inlines_reset_special_characters(parser);
+ 
+   cmark_strbuf_init(parser->mem, &parser->curline, 256);
+   cmark_strbuf_init(parser->mem, &parser->linebuf, 0);
+@@ -416,18 +417,24 @@
+   return child;
+ }
+ 
++// multimark: set the extension characters in this parser's own tables.
++// Upstream toggled them in global tables, so a parser finishing in one thread
++// could disable another thread's extensions mid-parse.
+ void cmark_manage_extensions_special_characters(cmark_parser *parser, int add) {
+   cmark_llist *tmp_ext;
++
++  cmark_inlines_reset_special_characters(parser);
++  if (!add)
++    return;
+ 
+   for (tmp_ext = parser->inline_syntax_extensions; tmp_ext; tmp_ext=tmp_ext->next) {
+     cmark_syntax_extension *ext = (cmark_syntax_extension *) tmp_ext->data;
+     cmark_llist *tmp_char;
+     for (tmp_char = ext->special_inline_chars; tmp_char; tmp_char=tmp_char->next) {
+       unsigned char c = (unsigned char)(size_t)tmp_char->data;
+-      if (add)
+-        cmark_inlines_add_special_character(c, ext->emphasis);
+-      else
+-        cmark_inlines_remove_special_character(c, ext->emphasis);
++      parser->special_chars[c] = 1;
++      if (ext->emphasis)
++        parser->skip_chars[c] = 1;
+     }
+   }
+ }
+--- a/src/commonmark.c
++++ b/src/commonmark.c
+@@ -22,6 +22,15 @@
+ 
+ // Functions to convert cmark_nodes to commonmark strings.
+ 
++// multimark addition: true if `node` belongs to a document parsed with the
++// math extension (see CMARK_NODE__ESCAPE_DOLLARS).
++static bool escape_dollars(cmark_node *node) {
++  while (node->parent) {
++    node = node->parent;
++  }
++  return (node->flags & CMARK_NODE__ESCAPE_DOLLARS) != 0;
++}
++
+ static CMARK_INLINE void outc(cmark_renderer *renderer, cmark_node *node, 
+                               cmark_escaping escape,
+                               int32_t c, unsigned char nextc) {
+@@ -38,6 +47,7 @@
+ 	 c == '*' || c == '_' || c == '[' || c == ']' || c == '#' || c == '<' ||
+          c == '>' || c == '\\' || c == '`' || c == '~' || c == '!' ||
+          (c == '&' && cmark_isalpha(nextc)) || (c == '!' && nextc == '[') ||
++         (c == '$' && escape_dollars(node)) ||
+          (renderer->begin_content && (c == '-' || c == '+' || c == '=') &&
+           // begin_content doesn't get set to false til we've passed digits
+           // at the beginning of line, so...
+--- a/src/inlines.c
++++ b/src/inlines.c
+@@ -63,7 +63,25 @@
+   bufsize_t backticks[MAXBACKTICKS + 1];
+   bool scanned_for_backticks;
+   bool no_link_openers;
++  // multimark: the parser's tables (see parser.h), not the global ones.
++  const int8_t *special_chars;
++  const int8_t *skip_chars;
+ } subject;
++
++// multimark: moved up from below handle_newline() for subject_from_buf().
++// "\r\n\\`&_*[]<!"
++static int8_t SPECIAL_CHARS[256] = {
++      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++      0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0,
++      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 1,
++      1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+ 
+ // Extensions may populate this.
+ static int8_t SKIP_CHARS[256];
+@@ -200,6 +218,8 @@
+   }
+   e->scanned_for_backticks = false;
+   e->no_link_openers = true;
++  e->special_chars = SPECIAL_CHARS;
++  e->skip_chars = SKIP_CHARS;
+ }
+ 
+ static CMARK_INLINE int isbacktick(int c) { return (c == '`'); }
+@@ -426,12 +446,12 @@
+   } else {
+     before_char_pos = subj->pos - 1;
+     // walk back to the beginning of the UTF_8 sequence:
+-    while ((peek_at(subj, before_char_pos) >> 6 == 2 || SKIP_CHARS[peek_at(subj, before_char_pos)]) && before_char_pos > 0) {
++    while ((peek_at(subj, before_char_pos) >> 6 == 2 || subj->skip_chars[peek_at(subj, before_char_pos)]) && before_char_pos > 0) {
+       before_char_pos -= 1;
+     }
+     len = cmark_utf8proc_iterate(subj->input.data + before_char_pos,
+                                  subj->pos - before_char_pos, &before_char);
+-    if (len == -1 || (before_char < 256 && SKIP_CHARS[(unsigned char) before_char])) {
++    if (len == -1 || (before_char < 256 && subj->skip_chars[(unsigned char) before_char])) {
+       before_char = 10;
+     }
+   }
+@@ -450,12 +470,12 @@
+     after_char = 10;
+   } else {
+     after_char_pos = subj->pos;
+-    while (SKIP_CHARS[peek_at(subj, after_char_pos)] && after_char_pos < subj->input.len) {
++    while (subj->skip_chars[peek_at(subj, after_char_pos)] && after_char_pos < subj->input.len) {
+       after_char_pos += 1;
+     }
+     len = cmark_utf8proc_iterate(subj->input.data + after_char_pos,
+                                  subj->input.len - after_char_pos, &after_char);
+-    if (len == -1 || (after_char < 256 && SKIP_CHARS[(unsigned char) after_char])) {
++    if (len == -1 || (after_char < 256 && subj->skip_chars[(unsigned char) after_char])) {
+     after_char = 10;
+   }
+   }
+@@ -1374,20 +1394,6 @@
+   }
+ }
+ 
+-// "\r\n\\`&_*[]<!"
+-static int8_t SPECIAL_CHARS[256] = {
+-      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-      0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0,
+-      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 1,
+-      1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+-
+ // " ' . -
+ static char SMART_PUNCT_CHARS[] = {
+       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+@@ -1407,7 +1413,7 @@
+   bufsize_t n = subj->pos + 1;
+ 
+   while (n < subj->input.len) {
+-    if (SPECIAL_CHARS[subj->input.data[n]])
++    if (subj->special_chars[subj->input.data[n]])
+       return n;
+     if (options & CMARK_OPT_SMART && SMART_PUNCT_CHARS[subj->input.data[n]])
+       return n;
+@@ -1427,6 +1433,12 @@
+   SPECIAL_CHARS[c] = 0;
+   if (emphasis)
+     SKIP_CHARS[c] = 0;
++}
++
++// multimark: give the parser its own copy of the default tables.
++void cmark_inlines_reset_special_characters(cmark_parser *parser) {
++  memcpy(parser->special_chars, SPECIAL_CHARS, sizeof(SPECIAL_CHARS));
++  memcpy(parser->skip_chars, SKIP_CHARS, sizeof(SKIP_CHARS));
+ }
+ 
+ static cmark_node *try_extensions(cmark_parser *parser,
+@@ -1537,6 +1549,8 @@
+   subject subj;
+   cmark_chunk content = {parent->content.ptr, parent->content.size, 0};
+   subject_from_buf(parser->mem, parent->start_line, parent->start_column - 1 + parent->internal_offset, &subj, &content, refmap);
++  subj.special_chars = parser->special_chars;
++  subj.skip_chars = parser->skip_chars;
+   cmark_chunk_rtrim(&subj.input);
+ 
+   while (!is_eof(&subj) && parse_inline(parser, &subj, parent, options))
+@@ -1745,6 +1759,19 @@
+   parser->pos = offset;
+ }
+ 
++// multimark addition: mirrors the bookkeeping in handle_newline().
++void cmark_inline_parser_set_offset_multiline(cmark_inline_parser *parser, int offset) {
++  bufsize_t i;
++  for (i = parser->pos; i < offset && i < parser->input.len; i++) {
++    unsigned char c = parser->input.data[i];
++    if (c == '\n' || (c == '\r' && peek_at(parser, i + 1) != '\n')) {
++      ++parser->line;
++      parser->column_offset = -(i + 1);
++    }
++  }
++  parser->pos = offset;
++}
++
+ int cmark_inline_parser_get_column(cmark_inline_parser *parser) {
+   return parser->pos + 1 + parser->column_offset + parser->block_offset;
+ }
+--- a/src/inlines.h
++++ b/src/inlines.h
+@@ -21,6 +21,7 @@
+ 
+ void cmark_inlines_add_special_character(unsigned char c, bool emphasis);
+ void cmark_inlines_remove_special_character(unsigned char c, bool emphasis);
++void cmark_inlines_reset_special_characters(cmark_parser *parser);
+ 
+ #ifdef __cplusplus
+ }
+--- a/src/node.h
++++ b/src/node.h
+@@ -53,9 +53,14 @@
+   CMARK_NODE__LAST_LINE_BLANK = (1 << 1),
+   CMARK_NODE__LAST_LINE_CHECKED = (1 << 2),
+ 
++  // multimark addition: set on the document root by the math extension so the
++  // CommonMark renderer escapes literal `$` in text (keeping round trips from
++  // turning plain dollars into math).
++  CMARK_NODE__ESCAPE_DOLLARS = (1 << 3),
++
+   // Extensions can register custom flags by calling `cmark_register_node_flag`.
+   // This is the starting value for the custom flags.
+-  CMARK_NODE__REGISTER_FIRST = (1 << 3),
++  CMARK_NODE__REGISTER_FIRST = (1 << 4),
+ };
+ 
+ typedef uint16_t cmark_node_internal_flags;
+--- a/src/parser.h
++++ b/src/parser.h
+@@ -50,6 +50,11 @@
+   cmark_llist *syntax_extensions;
+   cmark_llist *inline_syntax_extensions;
+   cmark_ispunct_func backslash_ispunct;
++  /* multimark: this parser's inline special and skip characters, filled in
++     before inline parsing. Upstream toggles extension characters in global
++     tables, so concurrent parsers raced each other. */
++  int8_t special_chars[256];
++  int8_t skip_chars[256];
+ };
+ 
+ #ifdef __cplusplus
+--- a/src/cmark-gfm-extension_api.h
++++ b/src/cmark-gfm-extension_api.h
+@@ -630,6 +630,15 @@
+ CMARK_GFM_EXPORT
+ void cmark_inline_parser_set_offset(cmark_inline_parser *parser, int offset);
+ 
++/** Like cmark_inline_parser_set_offset, but also updates the parser's line
++ * and column bookkeeping for any newlines between the current offset and
++ * 'offset', so source positions stay correct after an extension consumes a
++ * span that crosses lines. 'offset' must not be before the current offset.
++ * (multimark addition, used by the math extension.)
++ */
++CMARK_GFM_EXPORT
++void cmark_inline_parser_set_offset_multiline(cmark_inline_parser *parser, int offset);
++
+ /** Gets the cmark_chunk being operated on by the given inline parser.
+  * Use cmark_inline_parser_get_offset to get our current position in the chunk.
+  */
+--- a/extensions/autolink.c
++++ b/extensions/autolink.c
+@@ -482,7 +482,9 @@
+       continue;
+     }
+ 
+-    if (ev == CMARK_EVENT_ENTER && node->type == CMARK_NODE_TEXT) {
++    // multimark: skip text owned by another extension (the TeX inside math).
++    if (ev == CMARK_EVENT_ENTER && node->type == CMARK_NODE_TEXT &&
++        !node->extension) {
+       postprocess_text(parser, node);
+     }
+   }
+--- a/extensions/cmark-gfm-core-extensions.h
++++ b/extensions/cmark-gfm-core-extensions.h
+@@ -47,6 +47,12 @@
+ CMARK_GFM_EXPORT
+ int cmark_gfm_extensions_set_tasklist_item_checked(cmark_node *node, bool is_checked);
+ 
++/** Returns true if the node is display math (`$$...$$`), false for inline math
++ * and any other node. (multimark addition.)
++ */
++CMARK_GFM_EXPORT
++bool cmark_gfm_extensions_get_math_display(cmark_node *node);
++
+ #ifdef __cplusplus
+ }
+ #endif
+--- a/extensions/core-extensions.c
++++ b/extensions/core-extensions.c
+@@ -4,6 +4,7 @@
+ #include "table.h"
+ #include "tagfilter.h"
+ #include "tasklist.h"
++#include "texmath.h"
+ #include "registry.h"
+ #include "plugin.h"
+ 
+@@ -14,6 +15,7 @@
+   cmark_plugin_register_syntax_extension(plugin, create_autolink_extension());
+   cmark_plugin_register_syntax_extension(plugin, create_tagfilter_extension());
+   cmark_plugin_register_syntax_extension(plugin, create_tasklist_extension());
++  cmark_plugin_register_syntax_extension(plugin, create_math_extension());
+   return 1;
+ }
+ 
+--- /dev/null
++++ b/extensions/texmath.c
+@@ -0,0 +1,400 @@
++// multimark addition: TeX math between dollar signs, `$...$` (inline) and
++// `$$...$$` (display), following Pandoc's tex_math_dollars rules
++// (Text.Pandoc.Parsing.Math, pandoc 3.13+):
++//
++// - An inline opener can't be followed by whitespace, and an inline closer
++//   can't be preceded by whitespace or followed by a digit, so `$5 and $10`
++//   stays text.
++// - Display math may have whitespace just inside its delimiters.
++// - A backslash escapes the next character, so `\$` doesn't close the math.
++// - TeX groups `{...}` and `%` comments are consumed whole, so delimiters
++//   inside them (as in `\text{$x$}`) don't close the math.
++// - Math can't contain a blank line, and leading and trailing whitespace is
++//   trimmed from the TeX.
++//
++// Matching is purely inline, so a math span can't cross a block boundary:
++// a `$$` span over several lines ends early if one of its lines would start a
++// new block (a list item, a heading, ...).
++//
++// A math node holds its TeX in a single text child that belongs to this
++// extension, so every renderer emits the TeX verbatim.
++
++#include "texmath.h"
++#include "table.h"
++#include <parser.h>
++#include <render.h>
++#include <html.h>
++#include <houdini.h>
++#include <utf8.h>
++#include <cmark_ctype.h>
++
++cmark_node_type CMARK_NODE_MATH;
++
++static cmark_node_internal_flags CMARK_NODE__MATH_DISPLAY;
++
++typedef struct {
++  const unsigned char *data;
++  bufsize_t len;
++  bufsize_t pos;
++  bool dollar; // single-dollar (inline) delimiters
++  cmark_strbuf *buf;
++} scanner;
++
++static bool is_ws(unsigned char c) {
++  return c == ' ' || c == '\t' || c == '\n' || c == '\r';
++}
++
++// Length of the line ending at `pos` ("\n", "\r\n" or "\r"), or 0.
++static bufsize_t newline_len(scanner *s, bufsize_t pos) {
++  if (pos >= s->len)
++    return 0;
++  if (s->data[pos] == '\n')
++    return 1;
++  if (s->data[pos] == '\r')
++    return (pos + 1 < s->len && s->data[pos + 1] == '\n') ? 2 : 1;
++  return 0;
++}
++
++static bool at_blankline(scanner *s, bufsize_t pos) {
++  while (pos < s->len && (s->data[pos] == ' ' || s->data[pos] == '\t'))
++    pos++;
++  return newline_len(s, pos) > 0;
++}
++
++static bool at_closer(scanner *s) {
++  if (s->pos >= s->len || s->data[s->pos] != '$')
++    return false;
++  return s->dollar || (s->pos + 1 < s->len && s->data[s->pos + 1] == '$');
++}
++
++static bool at_dollar(scanner *s) {
++  return s->pos < s->len && s->data[s->pos] == '$';
++}
++
++// Consume a line ending (normalized to "\n") that isn't followed by a blank
++// line. Returns false if there is no line ending or the next line is blank.
++static bool scan_newline(scanner *s) {
++  bufsize_t nl = newline_len(s, s->pos);
++  if (nl == 0 || at_blankline(s, s->pos + nl))
++    return false;
++  s->pos += nl;
++  cmark_strbuf_putc(s->buf, '\n');
++  return true;
++}
++
++// Any character, but a line ending only if the next line isn't blank.
++static bool scan_char(scanner *s) {
++  if (s->pos >= s->len)
++    return false;
++  if (newline_len(s, s->pos))
++    return scan_newline(s);
++  cmark_strbuf_putc(s->buf, s->data[s->pos++]);
++  return true;
++}
++
++// `%` up to and including the end of the line.
++static bool scan_comment(scanner *s) {
++  cmark_strbuf_putc(s->buf, s->data[s->pos++]);
++  while (s->pos < s->len) {
++    if (newline_len(s, s->pos))
++      return scan_newline(s);
++    cmark_strbuf_putc(s->buf, s->data[s->pos++]);
++  }
++  return false;
++}
++
++// A balanced `{...}` group; escaped braces don't count.
++static bool scan_group(scanner *s) {
++  int depth = 1;
++  bool escaped = false;
++
++  cmark_strbuf_putc(s->buf, s->data[s->pos++]);
++  while (depth > 0) {
++    unsigned char c;
++    if (escaped) {
++      if (!scan_char(s))
++        return false;
++      escaped = false;
++      continue;
++    }
++    if (s->pos < s->len && s->data[s->pos] == '%') {
++      if (!scan_comment(s))
++        return false;
++      continue;
++    }
++    c = s->pos < s->len ? s->data[s->pos] : 0;
++    if (!scan_char(s))
++      return false;
++    if (c == '\\')
++      escaped = true;
++    else if (c == '}')
++      depth--;
++    else if (c == '{')
++      depth++;
++  }
++  return true;
++}
++
++// Scan the TeX after an opener up to and including the closer, appending it
++// to s->buf. Returns false if the math isn't closed.
++static bool scan_math(scanner *s) {
++  if (at_closer(s))
++    return false;
++
++  do {
++    unsigned char c;
++    if (s->pos >= s->len)
++      return false;
++    c = s->data[s->pos];
++
++    if (c == '%') {
++      if (!scan_comment(s))
++        return false;
++    } else if (c == '{') {
++      if (!scan_group(s))
++        return false;
++    } else if (c == ' ' || c == '\t') {
++      bufsize_t start = s->pos;
++      while (s->pos < s->len &&
++             (s->data[s->pos] == ' ' || s->data[s->pos] == '\t'))
++        s->pos++;
++      if (s->dollar && at_dollar(s))
++        return false;
++      cmark_strbuf_put(s->buf, s->data + start, s->pos - start);
++    } else if (newline_len(s, s->pos)) {
++      if (!scan_newline(s) || (s->dollar && at_dollar(s)))
++        return false;
++    } else if (c == '\\') {
++      cmark_strbuf_putc(s->buf, c);
++      s->pos++;
++      if (!scan_char(s))
++        return false;
++    } else {
++      cmark_strbuf_putc(s->buf, c);
++      s->pos++;
++    }
++  } while (!at_closer(s));
++
++  s->pos += s->dollar ? 1 : 2;
++  return true;
++}
++
++// Drop leading whitespace, and trailing whitespace except for one character
++// directly after a backslash (a TeX control space such as `\ `).
++static void trim_math(cmark_strbuf *buf) {
++  bufsize_t end = buf->size;
++  bufsize_t start = 0;
++
++  while (end > 0 && is_ws(buf->ptr[end - 1]))
++    end--;
++  if (end < buf->size && end > 0 && buf->ptr[end - 1] == '\\')
++    end++;
++  cmark_strbuf_truncate(buf, end);
++
++  while (start < buf->size && is_ws(buf->ptr[start]))
++    start++;
++  cmark_strbuf_drop(buf, start);
++}
++
++static bool starts_with_space(scanner *s) {
++  int32_t uc;
++  int len = cmark_utf8proc_iterate(s->data + s->pos, s->len - s->pos, &uc);
++  return len > 0 && (cmark_utf8proc_is_space(uc) || uc == '\v');
++}
++
++static cmark_node *match(cmark_syntax_extension *self, cmark_parser *parser,
++                         cmark_node *parent, unsigned char character,
++                         cmark_inline_parser *inline_parser) {
++  cmark_chunk *chunk;
++  cmark_strbuf buf;
++  cmark_node *math, *tex;
++  scanner s;
++  bufsize_t start, delim_len;
++  bool display;
++  int line, column;
++
++  if (character != '$')
++    return NULL;
++
++  chunk = cmark_inline_parser_get_chunk(inline_parser);
++  start = cmark_inline_parser_get_offset(inline_parser);
++  display = start + 1 < chunk->len && chunk->data[start + 1] == '$';
++  delim_len = display ? 2 : 1;
++
++  cmark_strbuf_init(parser->mem, &buf, 0);
++  s.data = chunk->data;
++  s.len = chunk->len;
++  s.pos = start + delim_len;
++  s.dollar = !display;
++  s.buf = &buf;
++
++  if ((s.dollar && s.pos < s.len && starts_with_space(&s)) ||
++      !scan_math(&s) ||
++      (s.dollar && s.pos < s.len && cmark_isdigit(s.data[s.pos]))) {
++    cmark_strbuf_free(&buf);
++    return NULL;
++  }
++  trim_math(&buf);
++
++  line = cmark_inline_parser_get_line(inline_parser);
++  column = cmark_inline_parser_get_column(inline_parser);
++
++  math = cmark_node_new_with_mem_and_ext(CMARK_NODE_MATH, parser->mem, self);
++  if (display)
++    math->flags |= CMARK_NODE__MATH_DISPLAY;
++
++  tex = cmark_node_new_with_mem_and_ext(CMARK_NODE_TEXT, parser->mem, self);
++  tex->as.literal = cmark_chunk_buf_detach(&buf);
++  cmark_node_append_child(math, tex);
++
++  cmark_inline_parser_set_offset_multiline(inline_parser, s.pos);
++
++  math->start_line = tex->start_line = line;
++  math->start_column = column;
++  tex->start_column = column + delim_len;
++  math->end_line = tex->end_line = cmark_inline_parser_get_line(inline_parser);
++  math->end_column = cmark_inline_parser_get_column(inline_parser) - 1;
++  tex->end_column = math->end_column - delim_len;
++
++  return math;
++}
++
++static bool is_display(cmark_node *node) {
++  return (node->flags & CMARK_NODE__MATH_DISPLAY) != 0;
++}
++
++bool cmark_gfm_extensions_get_math_display(cmark_node *node) {
++  if (!node || !node->extension || node->type != CMARK_NODE_MATH)
++    return false;
++  return is_display(node);
++}
++
++static const char *get_type_string(cmark_syntax_extension *extension,
++                                   cmark_node *node) {
++  if (node->type == CMARK_NODE_MATH)
++    return "math";
++  if (node->type == CMARK_NODE_TEXT)
++    return "text";
++  return "<unknown>";
++}
++
++static int can_contain(cmark_syntax_extension *extension, cmark_node *node,
++                       cmark_node_type child_type) {
++  return node->type == CMARK_NODE_MATH && child_type == CMARK_NODE_TEXT;
++}
++
++static const char *dollars(cmark_node *node) {
++  return is_display(node) ? "$$" : "$";
++}
++
++static void commonmark_render(cmark_syntax_extension *extension,
++                              cmark_renderer *renderer, cmark_node *node,
++                              cmark_event_type ev_type, int options) {
++  if (node->type == CMARK_NODE_MATH)
++    renderer->out(renderer, node, dollars(node), false, LITERAL);
++  else
++    renderer->out(renderer, node, cmark_node_get_literal(node), false, LITERAL);
++}
++
++static bool in_table_cell(cmark_node *node) {
++  for (node = node->parent; node; node = node->parent) {
++    if (node->type == CMARK_NODE_TABLE_CELL)
++      return true;
++  }
++  return false;
++}
++
++// Display math can't go in a tabular cell, so it's set inline there (as
++// Pandoc does).
++static void latex_render(cmark_syntax_extension *extension,
++                         cmark_renderer *renderer, cmark_node *node,
++                         cmark_event_type ev_type, int options) {
++  bool entering = (ev_type == CMARK_EVENT_ENTER);
++  if (node->type == CMARK_NODE_MATH) {
++    if (is_display(node) && !in_table_cell(node))
++      renderer->out(renderer, node, entering ? "\\[" : "\\]", false, LITERAL);
++    else
++      renderer->out(renderer, node, entering ? "\\(" : "\\)", false, LITERAL);
++  } else {
++    renderer->out(renderer, node, cmark_node_get_literal(node), false, LITERAL);
++  }
++}
++
++// man and plaintext can't typeset math, so they show the TeX between its
++// dollar delimiters (as Pandoc does when it can't convert the TeX).
++static void man_render(cmark_syntax_extension *extension,
++                       cmark_renderer *renderer, cmark_node *node,
++                       cmark_event_type ev_type, int options) {
++  if (node->type == CMARK_NODE_MATH)
++    renderer->out(renderer, node, dollars(node), false, LITERAL);
++  else
++    renderer->out(renderer, node, cmark_node_get_literal(node), false, NORMAL);
++}
++
++static void plaintext_render(cmark_syntax_extension *extension,
++                             cmark_renderer *renderer, cmark_node *node,
++                             cmark_event_type ev_type, int options) {
++  if (node->type == CMARK_NODE_MATH)
++    renderer->out(renderer, node, dollars(node), false, LITERAL);
++  else
++    renderer->out(renderer, node, cmark_node_get_literal(node), false, LITERAL);
++}
++
++// The markup MathJax and KaTeX look for (Pandoc's --mathjax output).
++static void html_render(cmark_syntax_extension *extension,
++                        cmark_html_renderer *renderer, cmark_node *node,
++                        cmark_event_type ev_type, int options) {
++  bool entering = (ev_type == CMARK_EVENT_ENTER);
++  if (node->type == CMARK_NODE_MATH) {
++    if (is_display(node))
++      cmark_strbuf_puts(renderer->html, entering
++                                            ? "<span class=\"math display\">\\["
++                                            : "\\]</span>");
++    else
++      cmark_strbuf_puts(renderer->html, entering
++                                            ? "<span class=\"math inline\">\\("
++                                            : "\\)</span>");
++  } else {
++    houdini_escape_html0(renderer->html, node->as.literal.data,
++                         node->as.literal.len, 0);
++  }
++}
++
++static const char *xml_attr(cmark_syntax_extension *extension,
++                            cmark_node *node) {
++  if (node->type != CMARK_NODE_MATH)
++    return NULL;
++  return is_display(node) ? " type=\"display\"" : " type=\"inline\"";
++}
++
++// Mark the document so the CommonMark renderer escapes literal dollars.
++static cmark_node *postprocess(cmark_syntax_extension *ext,
++                               cmark_parser *parser, cmark_node *root) {
++  root->flags |= CMARK_NODE__ESCAPE_DOLLARS;
++  return root;
++}
++
++cmark_syntax_extension *create_math_extension(void) {
++  cmark_syntax_extension *ext = cmark_syntax_extension_new("math");
++  cmark_llist *special_chars = NULL;
++
++  cmark_syntax_extension_set_get_type_string_func(ext, get_type_string);
++  cmark_syntax_extension_set_can_contain_func(ext, can_contain);
++  cmark_syntax_extension_set_commonmark_render_func(ext, commonmark_render);
++  cmark_syntax_extension_set_latex_render_func(ext, latex_render);
++  cmark_syntax_extension_set_man_render_func(ext, man_render);
++  cmark_syntax_extension_set_html_render_func(ext, html_render);
++  cmark_syntax_extension_set_plaintext_render_func(ext, plaintext_render);
++  cmark_syntax_extension_set_xml_attr_func(ext, xml_attr);
++  cmark_syntax_extension_set_postprocess_func(ext, postprocess);
++  CMARK_NODE_MATH = cmark_syntax_extension_add_node(1);
++  cmark_register_node_flag(&CMARK_NODE__MATH_DISPLAY);
++
++  cmark_syntax_extension_set_match_inline_func(ext, match);
++
++  cmark_mem *mem = cmark_get_default_mem_allocator();
++  special_chars = cmark_llist_append(mem, special_chars, (void *)'$');
++  cmark_syntax_extension_set_special_inline_chars(ext, special_chars);
++
++  return ext;
++}
+--- /dev/null
++++ b/extensions/texmath.h
+@@ -0,0 +1,11 @@
++#ifndef CMARK_GFM_TEXMATH_H
++#define CMARK_GFM_TEXMATH_H
++
++// Named texmath.h rather than math.h so it can't shadow the C library header.
++
++#include "cmark-gfm-core-extensions.h"
++
++extern cmark_node_type CMARK_NODE_MATH;
++cmark_syntax_extension *create_math_extension(void);
++
++#endif
+--- a/extensions/CMakeLists.txt
++++ b/extensions/CMakeLists.txt
+@@ -10,6 +10,7 @@
+     ext_scanners.re
+     ext_scanners.h
+     tasklist.c
++    texmath.c
+    )
+ 
+ include_directories(
+--- /dev/null
++++ b/MULTIMARK_LICENSE
+@@ -0,0 +1,128 @@
++MIT License
++
++Copyright (c) 2026 Richard Iannone
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files (the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all
++copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++SOFTWARE.
++
++---
++
++The vendored cmark-gfm C library (third_party/cmark-gfm/) is distributed under
++the following licenses:
++
++Copyright (c) 2014, John MacFarlane
++
++All rights reserved.
++
++Redistribution and use in source and binary forms, with or without
++modification, are permitted provided that the following conditions are met:
++
++    * Redistributions of source code must retain the above copyright
++      notice, this list of conditions and the following disclaimer.
++
++    * Redistributions in binary form must reproduce the above
++      copyright notice, this list of conditions and the following
++      disclaimer in the documentation and/or other materials provided
++      with the distribution.
++
++THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++
++-----
++
++houdini.h, houdini_href_e.c, houdini_html_e.c, houdini_html_u.c
++
++derive from https://github.com/vmg/houdini (with some modifications)
++
++Copyright (C) 2012 Vicent Martí
++
++Permission is hereby granted, free of charge, to any person obtaining a copy of
++this software and associated documentation files (the "Software"), to deal in
++the Software without restriction, including without limitation the rights to
++use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
++of the Software, and to permit persons to whom the Software is furnished to do
++so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all
++copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++SOFTWARE.
++
++-----
++
++buffer.h, buffer.c, chunk.h
++
++are derived from code (C) 2012 Github, Inc.
++
++Permission is hereby granted, free of charge, to any person obtaining a copy of
++this software and associated documentation files (the "Software"), to deal in
++the Software without restriction, including without limitation the rights to
++use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
++of the Software, and to permit persons to whom the Software is furnished to do
++so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all
++copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++SOFTWARE.
++
++-----
++
++utf8.c and utf8.h
++
++are derived from utf8proc (http://www.public-software-group.org/utf8proc),
++(C) 2009 Public Software Group e. V., Berlin, Germany.
++
++Permission is hereby granted, free of charge, to any person obtaining a
++copy of this software and associated documentation files (the "Software"),
++to deal in the Software without restriction, including without limitation
++the rights to use, copy, modify, merge, publish, distribute, sublicense,
++and/or sell copies of the Software, and to permit persons to whom the
++Software is furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in
++all copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
++DEALINGS IN THE SOFTWARE.
