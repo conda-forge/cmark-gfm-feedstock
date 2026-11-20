@@ -13,7 +13,7 @@ source:
   sha256: 1c1acf50c5e9939e170b6e017ec06fcf94abeb383670b819d091a285b7ba11fe
 
 build:
-  number: 0
+  number: 1
 
 requirements:
   build:
@@ -24,7 +24,10 @@ requirements:
     - if: unix
       then: make
   run_exports:
-    - ${{ pin_subpackage("cmark-gfm") }}
+    # The library's file name carries the whole version
+    # (libcmark-gfm.so.0.29.0.gfm.14, libcmark-gfm.0.29.0.gfm.14.dylib), so a
+    # package built against one release cannot load another: pin the version.
+    - cmark-gfm ==${{ version }}
 
 tests:
   - script:
